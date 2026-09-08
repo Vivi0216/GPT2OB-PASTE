@@ -1,6 +1,6 @@
 {
-  "id": "paste-refiner",
-  "name": "Paste Refiner",
+  "id": "GPT2OB-PASTE",
+  "name": "GPT2OB-PASTE",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "Refine AI-pasted Markdown with math repair, safe blank-line cleanup, and horizontal-rule normalization.",
