@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
     reduceMode: 'step', // 'step' reduces one blank line per run; 'one' collapses runs to one blank line
     fixMath: true,
     normalizeHorizontalRules: true,
+    autoRefineOnPaste: true,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -155,10 +156,10 @@ function convertMath(text, stats) {
         return `\x00CODE${idx}\x00`;
     });
 
-    // > \[ ... \] -> > $$ ... $$
+    // > \[ ... \] / > \\[ ... \\] -> > $$ ... $$
     text = text.replace(
-        /^>[ \t]*\\\[[ \t]*\r?\n([\s\S]*?)\r?\n>[ \t]*\\\][ \t]*$/gm,
-        (_match, inner) => {
+        /^>[ \t]*(\\{1,2})\[[ \t]*\r?\n([\s\S]*?)\r?\n>[ \t]*\1\][ \t]*$/gm,
+        (_match, _delimiter, inner) => {
             const cleaned = inner
                 .split(/\r?\n/)
                 .map((line) => line.replace(/^>[ \t]*/, ''))
@@ -183,9 +184,12 @@ function convertMath(text, stats) {
     text = text.replace(/^#[ \t]*(\[[ \t]*)$/gm, (_m, bracket) => bracket);
     text = text.replace(/^#[ \t]*(\\begin\{)/gm, '$1');
 
-    const displayBackslashRe = /(^|[^\\])\\\[((?:[\s\S]*?))\\\]/g;
+    // AI chat clipboards can contain either ordinary LaTeX delimiters (\[...\])
+    // or their Markdown/JSON-escaped form (\\[...\\]). Match the same number of
+    // backslashes on both sides while rejecting longer escaped runs.
+    const displayBackslashRe = /(^|[^\\])(\\{1,2})\[([\s\S]*?)\2\]/g;
     const hasLaTeXCommand = (s) => /\\[a-zA-Z]+/.test(s);
-    const inlineBackslashRe = /(^|[^\\])\\\((.+?)\\\)/g;
+    const inlineBackslashRe = /(^|[^\\])(\\{1,2})\((.+?)\2\)/g;
 
     const isMathy = (s, strict = false) => {
         if (/[\\_^→∞±≥≤]|\\text\{/.test(s)) return true;
@@ -210,9 +214,9 @@ function convertMath(text, stats) {
         return false;
     };
 
-    text = text.replace(/\\\][ \t]*\\\[/g, '\\]\n\\[');
+    text = text.replace(/(\\{1,2})\][ \t]*\1\[/g, '$1]\n$1[');
 
-    let out = text.replace(displayBackslashRe, (_, pre, inner) => {
+    let out = text.replace(displayBackslashRe, (_, pre, _delimiter, inner) => {
         stats.blockCount++;
         return `${pre}$$\n${inner.trim()}\n$$`;
     });
@@ -342,7 +346,7 @@ function convertMath(text, stats) {
         if (idx % 2 === 1 && part.startsWith('$$')) return part;
 
         let chunk = convertPlainParens(part, isMathy, stats);
-        chunk = chunk.replace(inlineBackslashRe, (_, pre, inner) => {
+        chunk = chunk.replace(inlineBackslashRe, (_, pre, _delimiter, inner) => {
             stats.inlineCount++;
             return `${pre}$${inner.trim()}$`;
         });
@@ -645,6 +649,10 @@ class PasteRefinerPlugin extends obsidian.Plugin {
         await this.loadSettings();
         this.addSettingTab(new PasteRefinerSettingTab(this.app, this));
 
+        this.registerEvent(
+            this.app.workspace.on('editor-paste', (event, editor) => this.handlePaste(event, editor))
+        );
+
         // Keep the original command ID so existing hotkeys continue to work.
         this.addCommand({
             id: 'refine-pasted-content',
@@ -684,6 +692,26 @@ class PasteRefinerPlugin extends obsidian.Plugin {
         return { text: result, stats };
     }
 
+    handlePaste(event, editor) {
+        if (!this.settings.autoRefineOnPaste || event.defaultPrevented) return;
+
+        const clipboardData = event.clipboardData;
+        if (!clipboardData) return;
+
+        // Keep Obsidian's native file/image paste behavior and compatibility with
+        // plugins that handle clipboard attachments.
+        if (clipboardData.files && clipboardData.files.length > 0) return;
+
+        const original = clipboardData.getData('text/plain');
+        if (!original) return;
+
+        const processed = this.processText(original, false);
+        if (processed.text === original) return;
+
+        event.preventDefault();
+        editor.replaceSelection(processed.text);
+    }
+
     polish(editor) {
         const selection = editor.getSelection();
         const original = selection || editor.getValue();
@@ -712,6 +740,18 @@ class PasteRefinerSettingTab extends obsidian.PluginSettingTab {
     display() {
         const { containerEl } = this;
         containerEl.empty();
+
+        new obsidian.Setting(containerEl)
+            .setName('Automatically refine pasted text')
+            .setDesc('Processes text during Ctrl/Cmd+V. File and image pastes are left to Obsidian and other plugins.')
+            .addToggle((toggle) => {
+                toggle
+                    .setValue(this.plugin.settings.autoRefineOnPaste)
+                    .onChange(async (value) => {
+                        this.plugin.settings.autoRefineOnPaste = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
 
         new obsidian.Setting(containerEl)
             .setName('Fix Math conversion')
